@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+supabase
+pydantic
+requests
+python-multipart
+aiofiles
+gunicorn
+mangum
