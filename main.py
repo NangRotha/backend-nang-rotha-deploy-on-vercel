@@ -1,7 +1,7 @@
 import os
 import uuid
 import json
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
 from models import ProjectCreate, ContactCreate, AboutCreate
@@ -27,6 +27,7 @@ app.add_middleware(
         "http://porfolio-rotha-v2-admin.vercel.app",
         "https://porfolio-rotha-v2-admin.vercel.app",
     ],
+    allow_origin_regex=r"^https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,8 +45,17 @@ CV_BUCKET_NAME = "cv-files"
 @app.get("/api/projects")
 def get_projects():
     try:
-        response = supabase.table("projects").select("*").execute()
-        return response.data
+        response = supabase.table("projects").select("*").order("id", desc=True).execute()
+        data = response.data or []
+        for p in data:
+            if isinstance(p.get("tech_stack"), str):
+                try:
+                    p["tech_stack"] = json.loads(p["tech_stack"])
+                except:
+                    p["tech_stack"] = [t.strip() for t in p["tech_stack"].split(",") if t.strip()]
+            elif not isinstance(p.get("tech_stack"), list):
+                p["tech_stack"] = []
+        return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
@@ -55,28 +65,178 @@ def get_project(id: int):
         response = supabase.table("projects").select("*").eq("id", id).execute()
         if not response.data:
             raise HTTPException(status_code=404, detail="Project not found")
-        return response.data[0]
+        project = response.data[0]
+        if isinstance(project.get("tech_stack"), str):
+            try:
+                project["tech_stack"] = json.loads(project["tech_stack"])
+            except:
+                project["tech_stack"] = [t.strip() for t in project["tech_stack"].split(",") if t.strip()]
+        elif not isinstance(project.get("tech_stack"), list):
+            project["tech_stack"] = []
+        return project
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+@app.post("/api/projects/upload-image")
+async def upload_project_image(image: UploadFile = File(...)):
+    try:
+        file_extension = image.filename.split(".")[-1]
+        unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
+        file_content = await image.read()
+        supabase.storage.from_(BUCKET_NAME).upload(unique_filename, file_content, {"content-type": image.content_type})
+        image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
+        return {"image_url": image_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/projects")
-async def create_project(project: ProjectCreate):
+async def create_project(request: Request):
     try:
-        response = supabase.table("projects").insert(project.model_dump()).execute()
-        return response.data
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
+            form_data = await request.form()
+            title = form_data.get("title")
+            description = form_data.get("description")
+            link = form_data.get("link") or None
+            category = form_data.get("category", "website")
+            tech_stack_raw = form_data.get("tech_stack")
+            demo_link = form_data.get("demo_link") or None
+            code_link = form_data.get("code_link") or None
+            rating_raw = form_data.get("rating", 0)
+            status = form_data.get("status", "Active")
+            image_file = form_data.get("image")
+
+            tech_stack = []
+            if tech_stack_raw:
+                try:
+                    tech_stack = json.loads(tech_stack_raw) if isinstance(tech_stack_raw, str) else tech_stack_raw
+                except:
+                    tech_stack = [t.strip() for t in str(tech_stack_raw).split(",") if t.strip()]
+
+            try:
+                rating = float(rating_raw) if rating_raw else 0.0
+            except (ValueError, TypeError):
+                rating = 0.0
+
+            image_url = None
+            if image_file and hasattr(image_file, "filename") and image_file.filename:
+                file_extension = image_file.filename.split(".")[-1]
+                unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
+                file_content = await image_file.read()
+                supabase.storage.from_(BUCKET_NAME).upload(
+                    unique_filename,
+                    file_content,
+                    {"content-type": getattr(image_file, "content_type", "image/jpeg")}
+                )
+                image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
+
+            project_dict = {
+                "title": title,
+                "description": description,
+                "category": category,
+                "tech_stack": tech_stack,
+                "status": status,
+                "rating": rating
+            }
+            if link:
+                project_dict["link"] = link
+            if demo_link:
+                project_dict["demo_link"] = demo_link
+            if code_link:
+                project_dict["code_link"] = code_link
+            if image_url:
+                project_dict["image_url"] = image_url
+
+            response = supabase.table("projects").insert(project_dict).execute()
+            return response.data
+        else:
+            body = await request.json()
+            project = ProjectCreate(**body)
+            data = project.model_dump()
+            response = supabase.table("projects").insert(data).execute()
+            return response.data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating project: {str(e)}")
 
 @app.put("/api/projects/{id}")
-async def update_project(id: int, project: ProjectCreate):
+async def update_project(id: int, request: Request):
     try:
-        check = supabase.table("projects").select("id").eq("id", id).execute()
+        check = supabase.table("projects").select("*").eq("id", id).execute()
         if not check.data:
             raise HTTPException(status_code=404, detail="Project not found")
-        response = supabase.table("projects").update(project.model_dump()).eq("id", id).execute()
-        return response.data
+        existing = check.data[0]
+
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
+            form_data = await request.form()
+            title = form_data.get("title", existing.get("title"))
+            description = form_data.get("description", existing.get("description"))
+            link = form_data.get("link") if "link" in form_data else existing.get("link")
+            category = form_data.get("category", existing.get("category", "website"))
+            tech_stack_raw = form_data.get("tech_stack")
+            demo_link = form_data.get("demo_link") if "demo_link" in form_data else existing.get("demo_link")
+            code_link = form_data.get("code_link") if "code_link" in form_data else existing.get("code_link")
+            rating_raw = form_data.get("rating", existing.get("rating", 0))
+            status = form_data.get("status", existing.get("status", "Active"))
+            image_file = form_data.get("image")
+
+            tech_stack = existing.get("tech_stack", [])
+            if tech_stack_raw is not None:
+                try:
+                    tech_stack = json.loads(tech_stack_raw) if isinstance(tech_stack_raw, str) else tech_stack_raw
+                except:
+                    tech_stack = [t.strip() for t in str(tech_stack_raw).split(",") if t.strip()]
+
+            try:
+                rating = float(rating_raw) if rating_raw is not None else 0.0
+            except (ValueError, TypeError):
+                rating = 0.0
+
+            project_dict = {
+                "title": title,
+                "description": description,
+                "category": category,
+                "tech_stack": tech_stack,
+                "status": status,
+                "rating": rating,
+                "link": link or None,
+                "demo_link": demo_link or None,
+                "code_link": code_link or None
+            }
+
+            if image_file and hasattr(image_file, "filename") and image_file.filename:
+                file_extension = image_file.filename.split(".")[-1]
+                unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
+                file_content = await image_file.read()
+                supabase.storage.from_(BUCKET_NAME).upload(
+                    unique_filename,
+                    file_content,
+                    {"content-type": getattr(image_file, "content_type", "image/jpeg")}
+                )
+                new_image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
+                project_dict["image_url"] = new_image_url
+
+                if existing.get("image_url"):
+                    try:
+                        old_filename = existing["image_url"].split("/")[-1].split("?")[0]
+                        supabase.storage.from_(BUCKET_NAME).remove([old_filename])
+                    except:
+                        pass
+
+            response = supabase.table("projects").update(project_dict).eq("id", id).execute()
+            return response.data
+        else:
+            body = await request.json()
+            project = ProjectCreate(**body)
+            data = project.model_dump()
+            response = supabase.table("projects").update(data).eq("id", id).execute()
+            return response.data
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating project: {str(e)}")
 
 @app.delete("/api/projects/{id}")
 def delete_project(id: int):
@@ -264,4 +424,5 @@ def root():
 # ==========================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8001))
+    uvicorn.run(app, host="0.0.0.0", port=port)

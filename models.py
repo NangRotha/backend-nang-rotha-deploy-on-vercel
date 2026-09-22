@@ -7,6 +7,12 @@ class ProjectCreate(BaseModel):
     description: str
     image_url: Optional[str] = None
     link: Optional[str] = None
+    category: Optional[str] = "website"
+    tech_stack: Optional[List[str]] = []
+    demo_link: Optional[str] = None
+    code_link: Optional[str] = None
+    rating: Optional[float] = 0.0
+    status: Optional[str] = "Active"
 
 # Schema for Contact messages
 class ContactCreate(BaseModel):
