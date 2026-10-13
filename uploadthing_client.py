@@ -1,7 +1,7 @@
 """Small UploadThing REST client for the Python backend.
 
 UploadThing only publishes a JavaScript SDK. This module follows their documented
-REST flow: request a presigned upload, post the file to storage, and keep the
+REST flow: request a v7 presigned upload, put the file into storage, and keep the
 returned public URL in Supabase.
 """
 
@@ -54,6 +54,16 @@ def _api_key() -> str:
     return api_key
 
 
+def _app_id() -> str:
+    token = os.getenv("UPLOADTHING_TOKEN", "").strip()
+    if not token:
+        raise UploadThingError("UPLOADTHING_TOKEN is not configured")
+    app_id = _decode_token(token).get("appId")
+    if not app_id:
+        raise UploadThingError("UPLOADTHING_TOKEN does not contain an appId")
+    return app_id
+
+
 def _headers() -> dict[str, str]:
     return {
         "x-uploadthing-api-key": _api_key(),
@@ -77,24 +87,25 @@ def validate_upload(content: bytes, content_type: str, *, document: bool = False
 def upload_bytes(filename: str, content: bytes, content_type: str) -> UploadedFile:
     safe_name = f"{Path(filename or 'upload').stem[:80]}{Path(filename or '').suffix.lower()}"
     request_body = {
-        "files": [{"name": safe_name, "size": len(content), "type": content_type}],
+        "fileName": safe_name,
+        "fileSize": len(content),
+        "fileType": content_type,
         "acl": "public-read",
-        "metadata": {"source": "nang-rotha-portfolio"},
         "contentDisposition": "inline",
     }
 
     try:
         prepared_response = requests.post(
-            f"{API_ROOT}/v6/uploadFiles",
+            f"{API_ROOT}/v7/prepareUpload",
             headers=_headers(),
             json=request_body,
             timeout=30,
         )
         prepared_response.raise_for_status()
-        prepared = prepared_response.json()["data"][0]
-        storage_response = requests.post(
+        prepared_payload = prepared_response.json()
+        prepared = prepared_payload.get("data", prepared_payload)
+        storage_response = requests.put(
             prepared["url"],
-            data=prepared.get("fields", {}),
             files={"file": (safe_name, content, content_type)},
             timeout=60,
         )
@@ -103,8 +114,8 @@ def upload_bytes(filename: str, content: bytes, content_type: str) -> UploadedFi
         detail = getattr(getattr(exc, "response", None), "text", "")
         raise UploadThingError(f"UploadThing upload failed{': ' + detail[:200] if detail else ''}") from exc
 
-    url = prepared.get("ufsUrl") or prepared.get("fileUrl")
-    key = prepared.get("key") or file_key_from_url(url or "")
+    key = prepared.get("key") or urlparse(prepared.get("url", "")).path.rsplit("/", 1)[-1]
+    url = prepared.get("ufsUrl") or prepared.get("fileUrl") or (f"https://{_app_id()}.ufs.sh/f/{key}" if key else None)
     if not url or not key:
         raise UploadThingError("UploadThing returned an incomplete upload response")
     return UploadedFile(url=url, key=key, name=safe_name)
