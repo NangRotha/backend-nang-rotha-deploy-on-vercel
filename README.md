@@ -10,6 +10,8 @@ Copy `.env.example` to `.env` and configure:
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
 - `UPLOADTHING_TOKEN` (the **SDK v7+ token**, not the legacy secret)
+- `DEEPSEEK_API_KEY` (server-side only, used by chat and translation)
+- `DEEPSEEK_MODEL` (optional; defaults to `deepseek-flash`)
 
 Never commit `.env`. If a token is exposed, revoke it in the UploadThing
 dashboard and create a replacement before deploying.

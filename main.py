@@ -1,10 +1,13 @@
 import os
 import json
 import asyncio
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+import requests
+import time
+from collections import defaultdict, deque
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from models import ContactCreate, AboutCreate
+from models import ContactCreate, AboutCreate, ChatRequest, TranslationRequest
 from uploadthing_client import (
     UploadThingError,
     delete_file_by_url,
@@ -19,6 +22,20 @@ app = FastAPI(
     title="Nang Rotha Portfolio API",
     version="1.0.0"
 )
+
+_rate_limits: dict[str, deque] = defaultdict(deque)
+
+
+def enforce_rate_limit(request: Request, bucket: str, limit: int = 12) -> None:
+    client = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
+    key = f"{bucket}:{client}"
+    now = time.monotonic()
+    window = _rate_limits[key]
+    while window and now - window[0] > 60:
+        window.popleft()
+    if len(window) >= limit:
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a minute and try again.")
+    window.append(now)
 
 # ==========================================
 # CORS CONFIGURATION
@@ -58,6 +75,26 @@ async def upload_to_uploadthing(file: UploadFile, *, document: bool = False) -> 
 async def delete_uploadthing_file(url: str | None) -> None:
     if url:
         await asyncio.to_thread(delete_file_by_url, url)
+
+
+def call_ai(messages: list[dict], *, max_tokens: int = 700) -> str:
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
+    response = requests.post(
+        os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/chat/completions"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": os.getenv("DEEPSEEK_MODEL", "deepseek-flash"),
+            "messages": messages,
+            "thinking": {"type": "disabled"},
+            "max_tokens": max_tokens,
+            "stream": False,
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 # ==========================================
 # 1. PROJECT CRUD
@@ -346,57 +383,58 @@ async def upload_cv(cv: UploadFile = File(...)):
 # 5. AI CHATBOT API
 # ==========================================
 @app.post("/api/chat")
-async def chat_with_bot(request: dict):
-    user_input = request.get("message", "").lower()
-    
+async def chat_with_bot(payload: ChatRequest, request: Request):
+    enforce_rate_limit(request, "chat", 12)
+    if not payload.message.strip() or len(payload.message) > 2000:
+        raise HTTPException(status_code=400, detail="Message must contain 1–2000 characters")
     try:
         about_res = supabase.table("about").select("*").execute()
         projects_res = supabase.table("projects").select("*").execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
     
-    about_data = about_res.data[0] if about_res.data else {}
-    projects = projects_res.data if projects_res.data else []
+    context = {
+        "profile": about_res.data[0] if about_res.data else {},
+        "projects": (projects_res.data or [])[:20],
+    }
+    language_name = "Khmer" if payload.language == "km" else "English"
+    system_prompt = (
+        "You are Nang Rotha's concise, friendly portfolio assistant. "
+        f"Always answer in {language_name}. Use only the supplied portfolio data for personal facts; "
+        "if information is missing, say so and suggest the Contact page. Never invent credentials, clients, or experience. "
+        f"PORTFOLIO DATA: {json.dumps(context, ensure_ascii=False, default=str)}"
+    )
+    history = [m.model_dump() for m in payload.history[-8:] if m.role in {"user", "assistant"}]
+    try:
+        response_text = await asyncio.to_thread(
+            call_ai,
+            [{"role": "system", "content": system_prompt}, *history, {"role": "user", "content": payload.message}],
+        )
+        return {"response": response_text, "provider": "deepseek"}
+    except (requests.RequestException, RuntimeError, KeyError, IndexError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=503, detail=f"AI assistant is temporarily unavailable: {str(e)[:160]}")
 
-    skills = []
-    if about_data.get('skills'):
-        if isinstance(about_data['skills'], str):
-            try:
-                skills = json.loads(about_data['skills'])
-            except:
-                skills = []
-        elif isinstance(about_data['skills'], list):
-            skills = about_data['skills']
 
-    response_text = "សូមទោស ខ្ញុំមិនទាន់មានព័ត៌មានអំពីសំណួរនេះនៅឡើយទេ។ សូមទាក់ទងមកខ្ញុំដោយផ្ទាល់នៅលើទំព័រ Contact សម្រាប់សំណួរកាន់តែលម្អិត។"
-
-    if any(word in user_input for word in ["ឈ្មោះ", "name", "who"]):
-        response_text = f"ឈ្មោះរបស់ខ្ញុំគឺ **{about_data.get('full_name', 'Nang Rotha')}**។ ខ្ញុំជា {about_data.get('job_title', 'Developer')}។"
-        
-    elif any(word in user_input for word in ["ជំនាញ", "skill", "know"]):
-        if skills:
-            skill_names = ", ".join([s['name'] for s in skills])
-            response_text = f"ជំនាញដែលខ្ញុំពូកែមានដូចជា៖ **{skill_names}**។"
-        else:
-            response_text = "បច្ចុប្បន្នខ្ញុំមិនទាន់បានកត់ត្រាជំនាញរបស់ខ្ញុំនៅឡើយទេ។"
-
-    elif any(word in user_input for word in ["គម្រោង", "project", "portfolio", "work"]):
-        if projects:
-            titles = ", ".join([p['title'] for p in projects[:5]])
-            response_text = f"គម្រោងសំខាន់ៗដែលខ្ញុំបានធ្វើរួចមានដូចជា៖ **{titles}**។ អ្នកអាចចូលទៅមើលគម្រោងទាំងអស់បាននៅក្នុងទំព័រ Projects។"
-        else:
-            response_text = "បច្ចុប្បន្នខ្ញុំមិនទាន់មានគម្រោងដែលបានចុះផ្សាយនៅឡើយទេ។"
-
-    elif any(word in user_input for word in ["ទីតាំង", "location", "live", "address"]):
-        response_text = f"ខ្ញុំរស់នៅ **{about_data.get('location', 'Cambodia')}**។"
-
-    elif any(word in user_input for word in ["ទាក់ទង", "contact", "email", "phone"]):
-        response_text = f"អ្នកអាចទាក់ទងមកខ្ញុំតាមរយៈអ៊ីមែល៖ **{about_data.get('email', 'N/A')}** ឬតាមរយៈទំព័រ Contact របស់គេហទំព័រ។"
-
-    elif any(word in user_input for word in ["សួស្តី", "hi", "hello", "good morning"]):
-        response_text = f"សួស្តី! រីករាយដែលបានស្គាល់អ្នក។ ខ្ញុំគឺ {about_data.get('full_name', 'Nang Rotha')}។ តើខ្ញុំអាចជួយអ្នកយ៉ាងដូចម្តេចខ្លះ?"
-
-    return {"response": response_text}
+@app.post("/api/translate")
+async def translate_text(payload: TranslationRequest, request: Request):
+    enforce_rate_limit(request, "translate", 30)
+    if payload.target_language not in {"km", "en"}:
+        raise HTTPException(status_code=400, detail="target_language must be 'km' or 'en'")
+    if not payload.text.strip() or len(payload.text) > 5000:
+        raise HTTPException(status_code=400, detail="Text must contain 1–5000 characters")
+    target = "natural Khmer" if payload.target_language == "km" else "natural English"
+    try:
+        translated = await asyncio.to_thread(
+            call_ai,
+            [
+                {"role": "system", "content": f"Translate the user text into {target}. Preserve names, URLs, code, formatting, and meaning. Return only the translation."},
+                {"role": "user", "content": payload.text},
+            ],
+            max_tokens=1200,
+        )
+        return {"translation": translated, "language": payload.target_language}
+    except (requests.RequestException, RuntimeError, KeyError, IndexError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=503, detail=f"Translation is temporarily unavailable: {str(e)[:160]}")
 
 
 # ==========================================

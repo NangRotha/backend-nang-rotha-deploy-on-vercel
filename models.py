@@ -46,3 +46,16 @@ class AboutCreate(BaseModel):
     skills: List[SkillItem] = []
     education: List[EducationItem] = []
     quote: Optional[str] = None
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    message: str
+    language: str = "km"
+    history: List[ChatMessage] = []
+
+class TranslationRequest(BaseModel):
+    text: str
+    target_language: str

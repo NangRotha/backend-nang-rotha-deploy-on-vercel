@@ -13,5 +13,9 @@ services:
         sync: false
       - key: UPLOADTHING_TOKEN
         sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-flash
       - key: PORT
         generateValue: true
