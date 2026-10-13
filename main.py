@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from models import ContactCreate, AboutCreate, ChatRequest, TranslationRequest
+from models import ContactCreate, AboutCreate, HomeCreate, NavbarCreate, ChatRequest, TranslationRequest
 from uploadthing_client import (
     UploadThingError,
     delete_file_by_url,
@@ -95,6 +95,35 @@ def call_ai(messages: list[dict], *, max_tokens: int = 700) -> str:
     )
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def get_singleton(table: str) -> dict:
+    response = supabase.table(table).select("*").order("id").limit(1).execute()
+    return response.data[0] if response.data else {}
+
+
+def get_singleton_image(table: str, record_id: int, field: str) -> str | None:
+    existing = supabase.table(table).select(field).eq("id", record_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail=f"{table.title()} data not found")
+    return existing.data[0].get(field)
+
+
+async def delete_image_if_unreferenced(url: str | None) -> None:
+    if not url:
+        return
+    references = (
+        ("about", "profile_image"), ("about", "resume_url"),
+        ("home", "profile_image"), ("navbar", "logo_url"), ("projects", "image_url"),
+    )
+    for table, field in references:
+        result = supabase.table(table).select("id").eq(field, url).limit(1).execute()
+        if result.data:
+            return
+    try:
+        await delete_uploadthing_file(url)
+    except UploadThingError:
+        pass
 
 # ==========================================
 # 1. PROJECT CRUD
@@ -231,10 +260,7 @@ async def update_project(
         }
         response = supabase.table("projects").update(data).eq("id", id).execute()
         if new_image_url and old_image_url:
-            try:
-                await delete_uploadthing_file(old_image_url)
-            except UploadThingError:
-                pass
+            await delete_image_if_unreferenced(old_image_url)
         return response.data
     except UploadThingError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -256,10 +282,7 @@ async def delete_project(id: int):
             raise HTTPException(status_code=404, detail="Project not found")
         old_url = check.data[0].get("image_url")
         supabase.table("projects").delete().eq("id", id).execute()
-        try:
-            await delete_uploadthing_file(old_url)
-        except UploadThingError:
-            pass
+        await delete_image_if_unreferenced(old_url)
         return {"message": "Project deleted successfully"}
     except HTTPException:
         raise
@@ -288,7 +311,137 @@ def create_contact(contact: ContactCreate):
 
 
 # ==========================================
-# 3. ABOUT (PROFILE) CRUD
+# 3. NAVBAR CRUD (INDEPENDENT DATA)
+# ==========================================
+@app.get("/api/navbar")
+def get_navbar():
+    try:
+        return get_singleton("navbar")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.post("/api/navbar")
+def create_navbar(navbar: NavbarCreate):
+    try:
+        if get_singleton("navbar"):
+            raise HTTPException(status_code=409, detail="Navbar data already exists")
+        return supabase.table("navbar").insert(navbar.model_dump()).execute().data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.put("/api/navbar/{id}")
+async def update_navbar(id: int, navbar: NavbarCreate):
+    try:
+        old_url = get_singleton_image("navbar", id, "logo_url")
+        response = supabase.table("navbar").update(navbar.model_dump()).eq("id", id).execute().data
+        if old_url != navbar.logo_url:
+            await delete_image_if_unreferenced(old_url)
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.delete("/api/navbar/{id}")
+async def delete_navbar(id: int):
+    try:
+        existing = supabase.table("navbar").select("logo_url").eq("id", id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Navbar data not found")
+        supabase.table("navbar").delete().eq("id", id).execute()
+        await delete_image_if_unreferenced(existing.data[0].get("logo_url"))
+        return {"message": "Navbar data deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.post("/api/navbar/upload-logo")
+async def upload_navbar_logo(image: UploadFile = File(...)):
+    try:
+        return {"logo_url": await upload_to_uploadthing(image)}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 4. HOME CRUD (INDEPENDENT DATA)
+# ==========================================
+@app.get("/api/home")
+def get_home():
+    try:
+        data = get_singleton("home")
+        if data and not isinstance(data.get("tech_stack"), list):
+            try:
+                data["tech_stack"] = json.loads(data.get("tech_stack") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                data["tech_stack"] = []
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.post("/api/home")
+def create_home(home: HomeCreate):
+    try:
+        if get_singleton("home"):
+            raise HTTPException(status_code=409, detail="Home data already exists")
+        return supabase.table("home").insert(home.model_dump()).execute().data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.put("/api/home/{id}")
+async def update_home(id: int, home: HomeCreate):
+    try:
+        old_url = get_singleton_image("home", id, "profile_image")
+        response = supabase.table("home").update(home.model_dump()).eq("id", id).execute().data
+        if old_url != home.profile_image:
+            await delete_image_if_unreferenced(old_url)
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.delete("/api/home/{id}")
+async def delete_home(id: int):
+    try:
+        existing = supabase.table("home").select("profile_image").eq("id", id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Home data not found")
+        supabase.table("home").delete().eq("id", id).execute()
+        await delete_image_if_unreferenced(existing.data[0].get("profile_image"))
+        return {"message": "Home data deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.post("/api/home/upload-image")
+async def upload_home_image(image: UploadFile = File(...)):
+    try:
+        return {"image_url": await upload_to_uploadthing(image)}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 5. ABOUT (PROFILE) CRUD
 # ==========================================
 @app.get("/api/about")
 def get_about():
@@ -344,10 +497,7 @@ async def update_about(id: int, about: AboutCreate):
         if old_resume_url and old_resume_url != about.resume_url:
             replaced_urls.append(old_resume_url)
         for old_url in replaced_urls:
-            try:
-                await delete_uploadthing_file(old_url)
-            except UploadThingError:
-                pass
+            await delete_image_if_unreferenced(old_url)
         return response.data
     except HTTPException:
         raise
@@ -389,12 +539,16 @@ async def chat_with_bot(payload: ChatRequest, request: Request):
         raise HTTPException(status_code=400, detail="Message must contain 1–2000 characters")
     try:
         about_res = supabase.table("about").select("*").execute()
+        home_res = supabase.table("home").select("*").execute()
+        navbar_res = supabase.table("navbar").select("*").execute()
         projects_res = supabase.table("projects").select("*").execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
     
     context = {
         "profile": about_res.data[0] if about_res.data else {},
+        "home": home_res.data[0] if home_res.data else {},
+        "navbar": navbar_res.data[0] if navbar_res.data else {},
         "projects": (projects_res.data or [])[:20],
     }
     language_name = "Khmer" if payload.language == "km" else "English"

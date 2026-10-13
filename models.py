@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 
 # Schema for creating/updating a Project
@@ -47,6 +47,32 @@ class AboutCreate(BaseModel):
     education: List[EducationItem] = []
     quote: Optional[str] = None
 
+class NavbarCreate(BaseModel):
+    brand_name: str
+    logo_url: Optional[str] = None
+    home_label_km: str = "ទំព័រដើម"
+    home_label_en: str = "Home"
+    about_label_km: str = "អំពីខ្ញុំ"
+    about_label_en: str = "About"
+    projects_label_km: str = "គម្រោង"
+    projects_label_en: str = "Projects"
+    contact_label_km: str = "ទាក់ទង"
+    contact_label_en: str = "Contact"
+
+class HomeCreate(BaseModel):
+    display_name: str
+    role: Optional[str] = None
+    profile_image: Optional[str] = None
+    availability_text: Optional[str] = None
+    eyebrow: Optional[str] = None
+    headline: Optional[str] = None
+    description: Optional[str] = None
+    primary_button_text: Optional[str] = None
+    secondary_button_text: Optional[str] = None
+    tech_stack: List[str] = Field(default_factory=list)
+    metric_label: Optional[str] = None
+    metric_value: Optional[str] = None
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -54,7 +80,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     language: str = "km"
-    history: List[ChatMessage] = []
+    history: List[ChatMessage] = Field(default_factory=list)
 
 class TranslationRequest(BaseModel):
     text: str
