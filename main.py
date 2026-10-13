@@ -1,10 +1,16 @@
 import os
-import uuid
 import json
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Form
+import asyncio
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from models import ProjectCreate, ContactCreate, AboutCreate
+from models import ContactCreate, AboutCreate
+from uploadthing_client import (
+    UploadThingError,
+    delete_file_by_url,
+    upload_bytes,
+    validate_upload,
+)
 
 # ==========================================
 # APP CONFIGURATION
@@ -36,8 +42,22 @@ app.add_middleware(
 # ==========================================
 # CONSTANTS
 # ==========================================
-BUCKET_NAME = "portfolio-images"
-CV_BUCKET_NAME = "cv-files"
+async def upload_to_uploadthing(file: UploadFile, *, document: bool = False) -> str:
+    content = await file.read()
+    content_type = file.content_type or "application/octet-stream"
+    validate_upload(content, content_type, document=document)
+    uploaded = await asyncio.to_thread(
+        upload_bytes,
+        file.filename or ("document.pdf" if document else "image.jpg"),
+        content,
+        content_type,
+    )
+    return uploaded.url
+
+
+async def delete_uploadthing_file(url: str | None) -> None:
+    if url:
+        await asyncio.to_thread(delete_file_by_url, url)
 
 # ==========================================
 # 1. PROJECT CRUD
@@ -82,175 +102,130 @@ def get_project(id: int):
 @app.post("/api/projects/upload-image")
 async def upload_project_image(image: UploadFile = File(...)):
     try:
-        file_extension = image.filename.split(".")[-1]
-        unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
-        file_content = await image.read()
-        supabase.storage.from_(BUCKET_NAME).upload(unique_filename, file_content, {"content-type": image.content_type})
-        image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
+        image_url = await upload_to_uploadthing(image)
         return {"image_url": image_url}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/projects")
-async def create_project(request: Request):
+async def create_project(
+    title: str = Form(...),
+    description: str = Form(...),
+    link: str = Form(""),
+    category: str = Form("website"),
+    tech_stack: str = Form("[]"),
+    demo_link: str = Form(""),
+    code_link: str = Form(""),
+    rating: float = Form(0),
+    status: str = Form("Active"),
+    image: UploadFile | None = File(None),
+):
+    image_url = None
     try:
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
-            form_data = await request.form()
-            title = form_data.get("title")
-            description = form_data.get("description")
-            link = form_data.get("link") or None
-            category = form_data.get("category", "website")
-            tech_stack_raw = form_data.get("tech_stack")
-            demo_link = form_data.get("demo_link") or None
-            code_link = form_data.get("code_link") or None
-            rating_raw = form_data.get("rating", 0)
-            status = form_data.get("status", "Active")
-            image_file = form_data.get("image")
-
-            tech_stack = []
-            if tech_stack_raw:
-                try:
-                    tech_stack = json.loads(tech_stack_raw) if isinstance(tech_stack_raw, str) else tech_stack_raw
-                except:
-                    tech_stack = [t.strip() for t in str(tech_stack_raw).split(",") if t.strip()]
-
-            try:
-                rating = float(rating_raw) if rating_raw else 0.0
-            except (ValueError, TypeError):
-                rating = 0.0
-
-            image_url = None
-            if image_file and hasattr(image_file, "filename") and image_file.filename:
-                file_extension = image_file.filename.split(".")[-1]
-                unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
-                file_content = await image_file.read()
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    unique_filename,
-                    file_content,
-                    {"content-type": getattr(image_file, "content_type", "image/jpeg")}
-                )
-                image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
-
-            project_dict = {
-                "title": title,
-                "description": description,
-                "category": category,
-                "tech_stack": tech_stack,
-                "status": status,
-                "rating": rating
-            }
-            if link:
-                project_dict["link"] = link
-            if demo_link:
-                project_dict["demo_link"] = demo_link
-            if code_link:
-                project_dict["code_link"] = code_link
-            if image_url:
-                project_dict["image_url"] = image_url
-
-            response = supabase.table("projects").insert(project_dict).execute()
-            return response.data
-        else:
-            body = await request.json()
-            project = ProjectCreate(**body)
-            data = project.model_dump()
-            response = supabase.table("projects").insert(data).execute()
-            return response.data
+        if image and image.filename:
+            image_url = await upload_to_uploadthing(image)
+        try:
+            tech_list = json.loads(tech_stack) if tech_stack else []
+        except (json.JSONDecodeError, TypeError):
+            tech_list = []
+        data = {
+            "title": title,
+            "description": description,
+            "link": link or None,
+            "category": category,
+            "tech_stack": tech_list,
+            "demo_link": demo_link or None,
+            "code_link": code_link or None,
+            "rating": rating,
+            "status": status,
+            "image_url": image_url,
+        }
+        response = supabase.table("projects").insert(data).execute()
+        return response.data
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating project: {str(e)}")
+        if image_url:
+            try:
+                await delete_uploadthing_file(image_url)
+            except UploadThingError:
+                pass
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
 @app.put("/api/projects/{id}")
-async def update_project(id: int, request: Request):
+async def update_project(
+    id: int,
+    title: str = Form(...),
+    description: str = Form(...),
+    link: str = Form(""),
+    category: str = Form("website"),
+    tech_stack: str = Form("[]"),
+    demo_link: str = Form(""),
+    code_link: str = Form(""),
+    rating: float = Form(0),
+    status: str = Form("Active"),
+    image: UploadFile | None = File(None),
+):
+    new_image_url = None
     try:
-        check = supabase.table("projects").select("*").eq("id", id).execute()
+        check = supabase.table("projects").select("id,image_url").eq("id", id).execute()
         if not check.data:
             raise HTTPException(status_code=404, detail="Project not found")
-        existing = check.data[0]
-
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
-            form_data = await request.form()
-            title = form_data.get("title", existing.get("title"))
-            description = form_data.get("description", existing.get("description"))
-            link = form_data.get("link") if "link" in form_data else existing.get("link")
-            category = form_data.get("category", existing.get("category", "website"))
-            tech_stack_raw = form_data.get("tech_stack")
-            demo_link = form_data.get("demo_link") if "demo_link" in form_data else existing.get("demo_link")
-            code_link = form_data.get("code_link") if "code_link" in form_data else existing.get("code_link")
-            rating_raw = form_data.get("rating", existing.get("rating", 0))
-            status = form_data.get("status", existing.get("status", "Active"))
-            image_file = form_data.get("image")
-
-            tech_stack = existing.get("tech_stack", [])
-            if tech_stack_raw is not None:
-                try:
-                    tech_stack = json.loads(tech_stack_raw) if isinstance(tech_stack_raw, str) else tech_stack_raw
-                except:
-                    tech_stack = [t.strip() for t in str(tech_stack_raw).split(",") if t.strip()]
-
+        old_image_url = check.data[0].get("image_url")
+        if image and image.filename:
+            new_image_url = await upload_to_uploadthing(image)
+        try:
+            tech_list = json.loads(tech_stack) if tech_stack else []
+        except (json.JSONDecodeError, TypeError):
+            tech_list = []
+        data = {
+            "title": title,
+            "description": description,
+            "link": link or None,
+            "category": category,
+            "tech_stack": tech_list,
+            "demo_link": demo_link or None,
+            "code_link": code_link or None,
+            "rating": rating,
+            "status": status,
+            "image_url": new_image_url or old_image_url,
+        }
+        response = supabase.table("projects").update(data).eq("id", id).execute()
+        if new_image_url and old_image_url:
             try:
-                rating = float(rating_raw) if rating_raw is not None else 0.0
-            except (ValueError, TypeError):
-                rating = 0.0
-
-            project_dict = {
-                "title": title,
-                "description": description,
-                "category": category,
-                "tech_stack": tech_stack,
-                "status": status,
-                "rating": rating,
-                "link": link or None,
-                "demo_link": demo_link or None,
-                "code_link": code_link or None
-            }
-
-            if image_file and hasattr(image_file, "filename") and image_file.filename:
-                file_extension = image_file.filename.split(".")[-1]
-                unique_filename = f"project_{uuid.uuid4()}.{file_extension}"
-                file_content = await image_file.read()
-                supabase.storage.from_(BUCKET_NAME).upload(
-                    unique_filename,
-                    file_content,
-                    {"content-type": getattr(image_file, "content_type", "image/jpeg")}
-                )
-                new_image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
-                project_dict["image_url"] = new_image_url
-
-                if existing.get("image_url"):
-                    try:
-                        old_filename = existing["image_url"].split("/")[-1].split("?")[0]
-                        supabase.storage.from_(BUCKET_NAME).remove([old_filename])
-                    except:
-                        pass
-
-            response = supabase.table("projects").update(project_dict).eq("id", id).execute()
-            return response.data
-        else:
-            body = await request.json()
-            project = ProjectCreate(**body)
-            data = project.model_dump()
-            response = supabase.table("projects").update(data).eq("id", id).execute()
-            return response.data
+                await delete_uploadthing_file(old_image_url)
+            except UploadThingError:
+                pass
+        return response.data
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating project: {str(e)}")
+        if new_image_url:
+            try:
+                await delete_uploadthing_file(new_image_url)
+            except UploadThingError:
+                pass
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
 @app.delete("/api/projects/{id}")
-def delete_project(id: int):
+async def delete_project(id: int):
     try:
         check = supabase.table("projects").select("image_url").eq("id", id).execute()
-        if check.data and check.data[0]["image_url"]:
-            old_url = check.data[0]["image_url"]
-            try:
-                old_filename = old_url.split("/")[-1].split("?")[0]
-                supabase.storage.from_(BUCKET_NAME).remove([old_filename])
-            except:
-                pass
-        response = supabase.table("projects").delete().eq("id", id).execute()
+        if not check.data:
+            raise HTTPException(status_code=404, detail="Project not found")
+        old_url = check.data[0].get("image_url")
+        supabase.table("projects").delete().eq("id", id).execute()
+        try:
+            await delete_uploadthing_file(old_url)
+        except UploadThingError:
+            pass
         return {"message": "Project deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
@@ -317,11 +292,28 @@ async def create_about(about: AboutCreate):
 @app.put("/api/about/{id}")
 async def update_about(id: int, about: AboutCreate):
     try:
+        existing = supabase.table("about").select("profile_image,resume_url").eq("id", id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        old_profile_image = existing.data[0].get("profile_image")
+        old_resume_url = existing.data[0].get("resume_url")
         data = about.model_dump()
         data['skills'] = json.dumps([s.model_dump() for s in about.skills])
         data['education'] = json.dumps([e.model_dump() for e in about.education])
         response = supabase.table("about").update(data).eq("id", id).execute()
+        replaced_urls = []
+        if old_profile_image and old_profile_image != about.profile_image:
+            replaced_urls.append(old_profile_image)
+        if old_resume_url and old_resume_url != about.resume_url:
+            replaced_urls.append(old_resume_url)
+        for old_url in replaced_urls:
+            try:
+                await delete_uploadthing_file(old_url)
+            except UploadThingError:
+                pass
         return response.data
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
@@ -332,24 +324,20 @@ async def update_about(id: int, about: AboutCreate):
 @app.post("/api/about/upload-image")
 async def upload_about_image(image: UploadFile = File(...)):
     try:
-        file_extension = image.filename.split(".")[-1]
-        unique_filename = f"profile_{uuid.uuid4()}.{file_extension}"
-        file_content = await image.read()
-        supabase.storage.from_(BUCKET_NAME).upload(unique_filename, file_content, {"content-type": image.content_type})
-        image_url = supabase.storage.from_(BUCKET_NAME).get_public_url(unique_filename)
+        image_url = await upload_to_uploadthing(image)
         return {"image_url": image_url}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/about/upload-cv")
 async def upload_cv(cv: UploadFile = File(...)):
     try:
-        file_extension = cv.filename.split(".")[-1]
-        unique_filename = f"cv_{uuid.uuid4()}.{file_extension}"
-        file_content = await cv.read()
-        supabase.storage.from_(CV_BUCKET_NAME).upload(unique_filename, file_content, {"content-type": cv.content_type})
-        cv_url = supabase.storage.from_(CV_BUCKET_NAME).get_public_url(unique_filename)
+        cv_url = await upload_to_uploadthing(cv, document=True)
         return {"cv_url": cv_url}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

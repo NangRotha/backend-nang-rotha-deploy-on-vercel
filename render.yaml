@@ -11,5 +11,7 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      - key: UPLOADTHING_TOKEN
+        sync: false
       - key: PORT
         generateValue: true
