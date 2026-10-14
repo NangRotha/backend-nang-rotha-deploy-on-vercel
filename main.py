@@ -324,6 +324,14 @@ def create_contact(contact: ContactCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
+@app.delete("/api/contacts/{id}")
+def delete_contact(id: int):
+    try:
+        response = supabase.table("contacts").delete().eq("id", id).execute()
+        return {"message": "Contact deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
 
 # ==========================================
 # 3. NAVBAR CRUD (INDEPENDENT DATA)
