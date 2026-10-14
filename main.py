@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from models import ContactCreate, AboutCreate, HomeCreate, NavbarCreate, ChatRequest, TranslationRequest
+from models import ContactCreate, AboutCreate, HomeCreate, NavbarCreate, SiteSettingsCreate, ChatRequest, TranslationRequest
 from uploadthing_client import (
     UploadThingError,
     delete_file_by_url,
@@ -441,7 +441,57 @@ async def upload_home_image(image: UploadFile = File(...)):
 
 
 # ==========================================
-# 5. ABOUT (PROFILE) CRUD
+# 5. SITE SETTINGS / MAINTENANCE CRUD
+# ==========================================
+@app.get("/api/site-settings")
+def get_site_settings():
+    try:
+        return get_singleton("site_settings")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.post("/api/site-settings")
+def create_site_settings(settings: SiteSettingsCreate):
+    try:
+        if get_singleton("site_settings"):
+            raise HTTPException(status_code=409, detail="Site settings already exist")
+        return supabase.table("site_settings").insert(settings.model_dump()).execute().data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.put("/api/site-settings/{id}")
+def update_site_settings(id: int, settings: SiteSettingsCreate):
+    try:
+        existing = supabase.table("site_settings").select("id").eq("id", id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Site settings not found")
+        return supabase.table("site_settings").update(settings.model_dump()).eq("id", id).execute().data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+@app.delete("/api/site-settings/{id}")
+def delete_site_settings(id: int):
+    try:
+        existing = supabase.table("site_settings").select("id").eq("id", id).execute()
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="Site settings not found")
+        supabase.table("site_settings").delete().eq("id", id).execute()
+        return {"message": "Site settings deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+
+# ==========================================
+# 6. ABOUT (PROFILE) CRUD
 # ==========================================
 @app.get("/api/about")
 def get_about():

@@ -73,6 +73,12 @@ class HomeCreate(BaseModel):
     metric_label: Optional[str] = None
     metric_value: Optional[str] = None
 
+class SiteSettingsCreate(BaseModel):
+    maintenance_enabled: bool = False
+    maintenance_title: str = "Portfolio is being improved"
+    maintenance_message: str = "We are building something better. Please check back soon."
+    expected_back_at: Optional[str] = None
+
 class ChatMessage(BaseModel):
     role: str
     content: str
