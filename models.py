@@ -31,6 +31,13 @@ class EducationItem(BaseModel):
     description: str
     badges: List[str]
 
+class ExperienceItem(BaseModel):
+    company: str
+    role: str
+    period: str
+    description: str
+    badges: List[str] = []
+
 class AboutCreate(BaseModel):
     full_name: str
     job_title: Optional[str] = None
@@ -46,6 +53,9 @@ class AboutCreate(BaseModel):
     skills: List[SkillItem] = []
     education: List[EducationItem] = []
     quote: Optional[str] = None
+    experience: List[ExperienceItem] = []
+    cover_letter_url: Optional[str] = None
+    cover_letter_text: Optional[str] = None
 
 class NavbarCreate(BaseModel):
     brand_name: str

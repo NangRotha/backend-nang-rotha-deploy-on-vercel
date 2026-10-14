@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import requests
 import time
@@ -7,7 +8,7 @@ from collections import defaultdict, deque
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from models import ContactCreate, AboutCreate, HomeCreate, NavbarCreate, SiteSettingsCreate, ChatRequest, TranslationRequest
+from models import ContactCreate, AboutCreate, HomeCreate, NavbarCreate, SiteSettingsCreate, ChatRequest, TranslationRequest, ExperienceItem
 from uploadthing_client import (
     UploadThingError,
     delete_file_by_url,
@@ -507,6 +508,51 @@ def delete_site_settings(id: int):
 # ==========================================
 # 6. ABOUT (PROFILE) CRUD
 # ==========================================
+def unpack_about_metadata(data: dict) -> dict:
+    if not data:
+        return data
+    bio = data.get('bio') or ''
+    meta_match = re.search(r'<!--\s*META:({.*?})\s*-->', bio, re.DOTALL)
+    experience = []
+    cover_letter_url = None
+    cover_letter_text = None
+    if meta_match:
+        try:
+            meta_json = json.loads(meta_match.group(1))
+            experience = meta_json.get('experience', [])
+            cover_letter_url = meta_json.get('cover_letter_url')
+            cover_letter_text = meta_json.get('cover_letter_text')
+            clean_bio = bio[:meta_match.start()] + bio[meta_match.end():]
+            data['bio'] = clean_bio.strip()
+        except Exception as e:
+            print(f"Failed to parse bio metadata: {e}")
+    data['experience'] = experience if isinstance(experience, list) else []
+    data['cover_letter_url'] = cover_letter_url
+    data['cover_letter_text'] = cover_letter_text
+    return data
+
+def prepare_about_save_data(about: AboutCreate) -> dict:
+    data = about.model_dump()
+    exp = data.pop('experience', []) or []
+    cl_url = data.pop('cover_letter_url', None)
+    cl_text = data.pop('cover_letter_text', None)
+
+    bio = data.get('bio') or ''
+    # Strip any existing metadata block
+    bio = re.sub(r'<!--\s*META:({.*?})\s*-->', '', bio, flags=re.DOTALL).strip()
+    if exp or cl_url or cl_text:
+        meta_dict = {
+            'experience': [e.model_dump() if hasattr(e, 'model_dump') else e for e in exp],
+            'cover_letter_url': cl_url,
+            'cover_letter_text': cl_text
+        }
+        meta_str = json.dumps(meta_dict, ensure_ascii=False)
+        bio = f"{bio}\n\n<!-- META:{meta_str} -->"
+    data['bio'] = bio
+    data['skills'] = json.dumps([s.model_dump() if hasattr(s, 'model_dump') else s for s in about.skills])
+    data['education'] = json.dumps([e.model_dump() if hasattr(e, 'model_dump') else e for e in about.education])
+    return data
+
 @app.get("/api/about")
 def get_about():
     try:
@@ -528,6 +574,7 @@ def get_about():
             except:
                 data['education'] = []
                 
+        data = unpack_about_metadata(data)
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
@@ -535,10 +582,10 @@ def get_about():
 @app.post("/api/about")
 async def create_about(about: AboutCreate):
     try:
-        data = about.model_dump()
-        data['skills'] = json.dumps([s.model_dump() for s in about.skills])
-        data['education'] = json.dumps([e.model_dump() for e in about.education])
+        data = prepare_about_save_data(about)
         response = supabase.table("about").insert(data).execute()
+        if response.data:
+            return unpack_about_metadata(response.data[0])
         return response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
@@ -546,22 +593,29 @@ async def create_about(about: AboutCreate):
 @app.put("/api/about/{id}")
 async def update_about(id: int, about: AboutCreate):
     try:
-        existing = supabase.table("about").select("profile_image,resume_url").eq("id", id).execute()
+        existing = supabase.table("about").select("profile_image,resume_url,bio").eq("id", id).execute()
         if not existing.data:
             raise HTTPException(status_code=404, detail="Profile not found")
         old_profile_image = existing.data[0].get("profile_image")
         old_resume_url = existing.data[0].get("resume_url")
-        data = about.model_dump()
-        data['skills'] = json.dumps([s.model_dump() for s in about.skills])
-        data['education'] = json.dumps([e.model_dump() for e in about.education])
+        old_meta = unpack_about_metadata(dict(existing.data[0]))
+        old_cover_letter_url = old_meta.get("cover_letter_url")
+
+        data = prepare_about_save_data(about)
         response = supabase.table("about").update(data).eq("id", id).execute()
+        
         replaced_urls = []
         if old_profile_image and old_profile_image != about.profile_image:
             replaced_urls.append(old_profile_image)
         if old_resume_url and old_resume_url != about.resume_url:
             replaced_urls.append(old_resume_url)
+        if old_cover_letter_url and old_cover_letter_url != about.cover_letter_url:
+            replaced_urls.append(old_cover_letter_url)
         for old_url in replaced_urls:
             await delete_image_if_unreferenced(old_url)
+            
+        if response.data:
+            return unpack_about_metadata(response.data[0])
         return response.data
     except HTTPException:
         raise
@@ -586,7 +640,17 @@ async def upload_about_image(image: UploadFile = File(...)):
 async def upload_cv(cv: UploadFile = File(...)):
     try:
         cv_url = await upload_to_uploadthing(cv, document=True)
-        return {"cv_url": cv_url}
+        return {"cv_url": cv_url, "resume_url": cv_url}
+    except UploadThingError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/about/upload-cover-letter")
+async def upload_cover_letter(file: UploadFile = File(...)):
+    try:
+        url = await upload_to_uploadthing(file, document=True)
+        return {"cover_letter_url": url}
     except UploadThingError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
