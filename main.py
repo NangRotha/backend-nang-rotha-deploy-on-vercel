@@ -190,6 +190,21 @@ async def upload_project_image(image: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def sync_about_project_count_if_auto():
+    try:
+        about_res = supabase.table("about").select("id, bio, stats_completed_projects").execute()
+        if not about_res.data:
+            return
+        about_row = about_res.data[0]
+        unpacked = unpack_about_metadata(dict(about_row))
+        if unpacked.get("stats_completed_projects_auto"):
+            proj_res = supabase.table("projects").select("id", count="exact").execute()
+            real_count = proj_res.count if proj_res.count is not None else len(proj_res.data or [])
+            if real_count != about_row.get("stats_completed_projects"):
+                supabase.table("about").update({"stats_completed_projects": real_count}).eq("id", about_row["id"]).execute()
+    except Exception as e:
+        print(f"Error syncing about project count: {e}")
+
 @app.post("/api/projects")
 async def create_project(
     title: str = Form(...),
@@ -224,6 +239,7 @@ async def create_project(
             "image_url": image_url,
         }
         response = supabase.table("projects").insert(data).execute()
+        sync_about_project_count_if_auto()
         return response.data
     except UploadThingError as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -297,6 +313,7 @@ async def delete_project(id: int):
             raise HTTPException(status_code=404, detail="Project not found")
         old_url = check.data[0].get("image_url")
         supabase.table("projects").delete().eq("id", id).execute()
+        sync_about_project_count_if_auto()
         await delete_image_if_unreferenced(old_url)
         return {"message": "Project deleted successfully"}
     except HTTPException:
@@ -567,11 +584,13 @@ def unpack_about_metadata(data: dict) -> dict:
             }
             clean_bio = bio[:meta_match.start()] + bio[meta_match.end():]
             data['bio'] = clean_bio.strip()
+            data['stats_completed_projects_auto'] = meta_json.get('stats_completed_projects_auto', False)
         except Exception as e:
             print(f"Failed to parse bio metadata: {e}")
     data['experience'] = experience if isinstance(experience, list) else []
     data['cover_letter_url'] = cover_letter_url
     data['cover_letter_text'] = cover_letter_text
+    data['stats_completed_projects_auto'] = data.get('stats_completed_projects_auto', False)
     for k, v in contact_meta.items():
         if k not in data or data[k] is None:
             data[k] = v
@@ -584,6 +603,17 @@ def prepare_about_save_data(about: AboutCreate) -> dict:
     exp = data.pop('experience', []) or []
     cl_url = data.pop('cover_letter_url', None)
     cl_text = data.pop('cover_letter_text', None)
+    stats_completed_projects_auto = data.pop('stats_completed_projects_auto', False)
+
+    # If auto sync projects is enabled, calculate real projects count from Supabase
+    if stats_completed_projects_auto:
+        try:
+            proj_res = supabase.table("projects").select("id", count="exact").execute()
+            real_count = proj_res.count if proj_res.count is not None else len(proj_res.data or [])
+            if real_count > 0:
+                data['stats_completed_projects'] = real_count
+        except Exception as pe:
+            print(f"Failed to auto-count projects on save: {pe}")
 
     # Extract contact meta fields to avoid Supabase unknown column errors
     phone = data.pop('phone', None)
@@ -611,6 +641,7 @@ def prepare_about_save_data(about: AboutCreate) -> dict:
         'contact_title_en': contact_title_en,
         'contact_subtitle_km': contact_subtitle_km,
         'contact_subtitle_en': contact_subtitle_en,
+        'stats_completed_projects_auto': bool(stats_completed_projects_auto),
     }
     meta_str = json.dumps(meta_dict, ensure_ascii=False)
     bio = f"{bio}\n\n<!-- META:{meta_str} -->"
@@ -641,6 +672,22 @@ def get_about():
                 data['education'] = []
                 
         data = unpack_about_metadata(data)
+
+        # Count actual projects in database
+        real_projects_count = 0
+        try:
+            proj_res = supabase.table("projects").select("id", count="exact").execute()
+            real_projects_count = proj_res.count if proj_res.count is not None else len(proj_res.data or [])
+        except Exception as pe:
+            print(f"Failed to count projects in get_about: {pe}")
+
+        data['auto_completed_projects'] = real_projects_count
+
+        # If user enabled auto sync OR if stats_completed_projects is 0/empty, automatically provide real_projects_count
+        if data.get('stats_completed_projects_auto') or not data.get('stats_completed_projects'):
+            if real_projects_count > 0:
+                data['stats_completed_projects'] = real_projects_count
+
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")

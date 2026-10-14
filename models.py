@@ -48,6 +48,7 @@ class AboutCreate(BaseModel):
     bio: Optional[str] = None
     resume_url: Optional[str] = None
     stats_completed_projects: Optional[int] = 0
+    stats_completed_projects_auto: Optional[bool] = False
     stats_years_experience: Optional[int] = 0
     stats_happy_clients: Optional[int] = 0
     skills: List[SkillItem] = []
