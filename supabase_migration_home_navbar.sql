@@ -43,6 +43,24 @@ create table if not exists public.site_settings (
   updated_at timestamptz not null default now()
 );
 
+-- Public pages may read these records. Mutations must use a server-side
+-- Supabase service-role key and must never expose that key to either frontend.
+alter table public.navbar enable row level security;
+alter table public.home enable row level security;
+alter table public.site_settings enable row level security;
+
+drop policy if exists "portfolio navbar read access" on public.navbar;
+create policy "portfolio navbar read access" on public.navbar
+  for select to anon, authenticated using (true);
+
+drop policy if exists "portfolio home read access" on public.home;
+create policy "portfolio home read access" on public.home
+  for select to anon, authenticated using (true);
+
+drop policy if exists "portfolio site settings read access" on public.site_settings;
+create policy "portfolio site settings read access" on public.site_settings
+  for select to anon, authenticated using (true);
+
 -- Seed each new table once from the current profile. Later updates never read from About.
 insert into public.navbar (brand_name, logo_url)
 select coalesce(full_name, 'Nang Rotha'), profile_image from public.about

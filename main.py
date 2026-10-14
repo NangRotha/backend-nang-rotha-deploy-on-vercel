@@ -129,7 +129,7 @@ async def delete_image_if_unreferenced(url: str | None) -> None:
 # 1. PROJECT CRUD
 # ==========================================
 @app.get("/api/projects")
-def get_projects():
+def get_projects(category: str | None = None):
     try:
         response = supabase.table("projects").select("*").order("id", desc=True).execute()
         data = response.data or []
@@ -141,6 +141,20 @@ def get_projects():
                     p["tech_stack"] = [t.strip() for t in p["tech_stack"].split(",") if t.strip()]
             elif not isinstance(p.get("tech_stack"), list):
                 p["tech_stack"] = []
+        
+        if category and category.strip() and category.strip().lower() != "all":
+            cat_norm = category.strip().lower()
+            def match_cat(c):
+                c = (c or "").strip().lower()
+                if cat_norm in ["website", "web"]:
+                    return c in ["website", "web", "web app", "web development"]
+                if cat_norm in ["mobile", "app"]:
+                    return c in ["mobile", "app", "mobile app", "android", "ios", "flutter"]
+                if cat_norm in ["uxui", "uiux", "ux/ui", "ui/ux", "designer", "design"]:
+                    return c in ["uxui", "uiux", "ux/ui", "ui/ux", "designer", "design", "graphic"]
+                return c == cat_norm
+            data = [p for p in data if match_cat(p.get("category"))]
+            
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
@@ -200,7 +214,7 @@ async def create_project(
             "title": title,
             "description": description,
             "link": link or None,
-            "category": category,
+            "category": (category or "website").strip().lower(),
             "tech_stack": tech_list,
             "demo_link": demo_link or None,
             "code_link": code_link or None,
@@ -250,7 +264,7 @@ async def update_project(
             "title": title,
             "description": description,
             "link": link or None,
-            "category": category,
+            "category": (category or "website").strip().lower(),
             "tech_stack": tech_list,
             "demo_link": demo_link or None,
             "code_link": code_link or None,
