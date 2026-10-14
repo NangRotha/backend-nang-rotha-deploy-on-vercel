@@ -56,6 +56,14 @@ class AboutCreate(BaseModel):
     experience: List[ExperienceItem] = []
     cover_letter_url: Optional[str] = None
     cover_letter_text: Optional[str] = None
+    phone: Optional[str] = None
+    telegram: Optional[str] = None
+    availability_status: Optional[str] = "Available for projects"
+    reply_time: Optional[str] = None
+    contact_title_km: Optional[str] = None
+    contact_title_en: Optional[str] = None
+    contact_subtitle_km: Optional[str] = None
+    contact_subtitle_en: Optional[str] = None
 
 class NavbarCreate(BaseModel):
     brand_name: str

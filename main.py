@@ -324,6 +324,30 @@ def create_contact(contact: ContactCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
 
+@app.get("/api/contacts/{id}")
+def get_contact_by_id(id: int):
+    try:
+        response = supabase.table("contacts").select("*").eq("id", id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
+@app.put("/api/contacts/{id}")
+def update_contact(id: int, contact: ContactCreate):
+    try:
+        response = supabase.table("contacts").update(contact.model_dump()).eq("id", id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Contact not found")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Supabase error: {str(e)}")
+
 @app.delete("/api/contacts/{id}")
 def delete_contact(id: int):
     try:
@@ -524,12 +548,23 @@ def unpack_about_metadata(data: dict) -> dict:
     experience = []
     cover_letter_url = None
     cover_letter_text = None
+    contact_meta = {}
     if meta_match:
         try:
             meta_json = json.loads(meta_match.group(1))
             experience = meta_json.get('experience', [])
             cover_letter_url = meta_json.get('cover_letter_url')
             cover_letter_text = meta_json.get('cover_letter_text')
+            contact_meta = {
+                'phone': meta_json.get('phone', ''),
+                'telegram': meta_json.get('telegram', ''),
+                'availability_status': meta_json.get('availability_status', 'Available for projects'),
+                'reply_time': meta_json.get('reply_time', 'ឆ្លើយតបក្នុងរយៈពេល ២៤ ម៉ោង'),
+                'contact_title_km': meta_json.get('contact_title_km', 'ទាក់ទងខ្ញុំ'),
+                'contact_title_en': meta_json.get('contact_title_en', 'Contact Me'),
+                'contact_subtitle_km': meta_json.get('contact_subtitle_km', 'មានគម្រោងក្នុងចិត្ត? ចូរទម្លាក់សារមកខ្ញុំ... ខ្ញុំនឹងឆ្លើយតបអ្នកវិញក្នុងរយៈពេល ២៤ ម៉ោង។'),
+                'contact_subtitle_en': meta_json.get('contact_subtitle_en', 'Have a project in mind? Drop me a message and I will reply within 24 hours.'),
+            }
             clean_bio = bio[:meta_match.start()] + bio[meta_match.end():]
             data['bio'] = clean_bio.strip()
         except Exception as e:
@@ -537,6 +572,11 @@ def unpack_about_metadata(data: dict) -> dict:
     data['experience'] = experience if isinstance(experience, list) else []
     data['cover_letter_url'] = cover_letter_url
     data['cover_letter_text'] = cover_letter_text
+    for k, v in contact_meta.items():
+        if k not in data or data[k] is None:
+            data[k] = v
+    if not data.get('availability_status'):
+        data['availability_status'] = 'Available for projects'
     return data
 
 def prepare_about_save_data(about: AboutCreate) -> dict:
@@ -545,17 +585,35 @@ def prepare_about_save_data(about: AboutCreate) -> dict:
     cl_url = data.pop('cover_letter_url', None)
     cl_text = data.pop('cover_letter_text', None)
 
+    # Extract contact meta fields to avoid Supabase unknown column errors
+    phone = data.pop('phone', None)
+    telegram = data.pop('telegram', None)
+    availability_status = data.pop('availability_status', None)
+    reply_time = data.pop('reply_time', None)
+    contact_title_km = data.pop('contact_title_km', None)
+    contact_title_en = data.pop('contact_title_en', None)
+    contact_subtitle_km = data.pop('contact_subtitle_km', None)
+    contact_subtitle_en = data.pop('contact_subtitle_en', None)
+
     bio = data.get('bio') or ''
     # Strip any existing metadata block
     bio = re.sub(r'<!--\s*META:({.*?})\s*-->', '', bio, flags=re.DOTALL).strip()
-    if exp or cl_url or cl_text:
-        meta_dict = {
-            'experience': [e.model_dump() if hasattr(e, 'model_dump') else e for e in exp],
-            'cover_letter_url': cl_url,
-            'cover_letter_text': cl_text
-        }
-        meta_str = json.dumps(meta_dict, ensure_ascii=False)
-        bio = f"{bio}\n\n<!-- META:{meta_str} -->"
+    
+    meta_dict = {
+        'experience': [e.model_dump() if hasattr(e, 'model_dump') else e for e in exp],
+        'cover_letter_url': cl_url,
+        'cover_letter_text': cl_text,
+        'phone': phone,
+        'telegram': telegram,
+        'availability_status': availability_status,
+        'reply_time': reply_time,
+        'contact_title_km': contact_title_km,
+        'contact_title_en': contact_title_en,
+        'contact_subtitle_km': contact_subtitle_km,
+        'contact_subtitle_en': contact_subtitle_en,
+    }
+    meta_str = json.dumps(meta_dict, ensure_ascii=False)
+    bio = f"{bio}\n\n<!-- META:{meta_str} -->"
     data['bio'] = bio
     data['skills'] = json.dumps([s.model_dump() if hasattr(s, 'model_dump') else s for s in about.skills])
     data['education'] = json.dumps([e.model_dump() if hasattr(e, 'model_dump') else e for e in about.education])
